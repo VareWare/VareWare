@@ -1,4 +1,3 @@
--- VAREWARE AIMLOCK | FULL VERSION | STRICT WALL CHECK | KEY: PAPAKAINE
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
@@ -10,11 +9,12 @@ local CoreGui = game:GetService("CoreGui")
 local RaycastParams = RaycastParams.new()
 
 local LocalPlayer = Players.LocalPlayer
-local Character, Humanoid, HumanoidRootPart, PlayerGui
+local Character, Humanoid, HumanoidRootPart, UpperTorso, PlayerGui = nil, nil, nil, nil, nil
 local function UpdateChar()
     Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
     Humanoid = Character:WaitForChild("Humanoid")
     HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+    UpperTorso = Character:WaitForChild("UpperTorso", 10) or Character:WaitForChild("Torso", 10)
     PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 end
 UpdateChar()
@@ -23,7 +23,6 @@ LocalPlayer.CharacterAdded:Connect(UpdateChar)
 local C = { WHITE = Color3.new(1,1,1), BLACK = Color3.new(0,0,0), GREY = Color3.new(0.3,0.3,0.3) }
 local OPACITY_70 = 0.7
 local UNLOCK_KEY = "PAPAKAINE"
-local Unlocked = false
 
 local SOUND_TAB = "rbxassetid://132570658772029"
 local SOUND_BTN = "rbxassetid://101795118548847"
@@ -37,7 +36,6 @@ local function PlaySound(id, vol)
     game.Debris:AddItem(s, 2)
 end
 
--- UNLOCK SCREEN
 local UnlockGui = Instance.new("ScreenGui", CoreGui)
 UnlockGui.Name = "VareWareUnlock"
 local UnlockBg = Instance.new("Frame", UnlockGui)
@@ -74,13 +72,27 @@ Instance.new("UICorner",UnlockBtn).CornerRadius = UDim.new(0.12,0)
 
 UnlockBtn.MouseButton1Click:Connect(function()
     PlaySound(SOUND_BTN)
-    if KeyBox.Text:upper() == UNLOCK_KEY then Unlocked = true; UnlockGui:Destroy(); LoadMainScript() end
+    if KeyBox.Text:upper() == UNLOCK_KEY then UnlockGui:Destroy(); LoadMainScript() end
 end)
+
+_G.Settings = {
+    AimlockEnabled = false, AimSpeed = 50, Offset = 15, Prediction = 8,
+    ZoomFOV = 45, NormalFOV = 70, AutoZoomEnabled = false,
+    AutoAirTrigger = false, ShowNameDist = true, ShowSkeleton = true,
+    AimPart = "Head", TargetIndicator = true, AutoRespawn = false
+}
+_G.Enemies = {}
+local CurrentTarget = nil
+local LastShot = 0
+local LastKnownHealth = {}
+local AUTO_SHOOT_DELAY = 0.22
+local OriginalCam, ViewTarget = nil, nil
+local RotateIndicator = nil
+local RespawnGui = nil
 function LoadMainScript()
 RaycastParams.FilterDescendantsInstances = {Character}
 RaycastParams.FilterType = Enum.RaycastFilterType.Exclude
 
--- ✅ UPDATED: STRICT WALL CHECK — NO LOCK THROUGH WALLS
 local function HasLineOfSight(fromPos, toPart)
     if not fromPos or not toPart then return false end
     local offset = Vector3.new(0, 1, 0)
@@ -89,39 +101,144 @@ local function HasLineOfSight(fromPos, toPart)
     return not res or res.Instance:IsDescendantOf(toPart.Parent)
 end
 
-local function IsOnScreen(worldPos)
-    local pos, vis = Camera:WorldToViewportPoint(worldPos)
-    return vis and pos.X > 0 and pos.X < Camera.ViewportSize.X and pos.Y > 0 and pos.Y < Camera.ViewportSize.Y
+-- ✅ STOP AIMING IF YOUR HEALTH ≤13, ONLY RESUME WHEN >13
+local function CanAim()
+    if not Humanoid then return false end
+    return Humanoid.Health > 13
 end
 
+-- Skip ragdolled enemies
 local function IsRagdolled(hum)
     if not hum or not hum.Parent then return true end
     local char = hum.Parent
     return hum:GetState() == Enum.HumanoidStateType.Ragdoll
-        or hum.PlatformStand == true
         or char:FindFirstChild("IsRagdoll") and char.IsRagdoll.Value == true
-        or char:FindFirstChild("Ragdoll") ~= nil
-        or hum.Sit == true
 end
 
-local function IsValidHuman(hum)
-    if not hum or hum.Health <= 0 then return false end
-    if IsRagdolled(hum) then return false end
-    return true
+-- ✅ ONLY target enemies with health >13, skip if ≤1
+local function IsValidTarget(char)
+    local hum = char and char:FindFirstChild("Humanoid")
+    if not hum then return false end
+    if hum.Health <= 1 then return false end
+    if hum.Health <= 13 then return false end
+    return not IsRagdolled(hum)
 end
 
-_G.Settings = {
-    AimlockEnabled = false, AimSpeed = 50, Offset = 15, Prediction = 8,
-    ZoomFOV = 45, NormalFOV = 70, AutoZoomEnabled = false,
-    AutoAirTrigger = false, ShowNameDist = true, ShowSkeleton = true,
-    AimPart = "UpperTorso"
-}
-_G.Enemies = {}
-local CurrentTarget = nil
+-- RESPAWN SYSTEM
+local function CreateRespawnGui()
+    if RespawnGui then RespawnGui:Destroy() end
+    RespawnGui = Instance.new("ScreenGui", PlayerGui)
+    RespawnGui.Name = "RespawnUI"
+    RespawnGui.ResetOnSpawn = false
+    RespawnGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+    local Main = Instance.new("Frame", RespawnGui)
+    Main.Size = UDim2.new(0,220,0,140)
+    Main.Position = UDim2.new(0.5,-110,0.6,-70)
+    Main.BackgroundTransparency = 1 - OPACITY_70
+    Main.BackgroundColor3 = C.BLACK
+    Instance.new("UICorner",Main).CornerRadius = UDim.new(0.06,0)
+
+    local Title = Instance.new("TextLabel", Main)
+    Title.Size = UDim2.new(1,0,0,35)
+    Title.Position = UDim2.new(0,0,0,10)
+    Title.BackgroundTransparency = 1
+    Title.Font = Enum.Font.GothamBold
+    Title.Text = "YOU DIED"
+    Title.TextColor3 = C.WHITE
+    Title.TextSize = 18
+
+    local Sub = Instance.new("TextLabel", Main)
+    Sub.Size = UDim2.new(1,0,0,25)
+    Sub.Position = UDim2.new(0,0,0,45)
+    Sub.BackgroundTransparency = 1
+    Sub.Font = Enum.Font.Gotham
+    Sub.Text = "Health >13 to resume aiming"
+    Sub.TextColor3 = C.GREY
+    Sub.TextSize = 12
+
+    local RespawnBtn = Instance.new("TextButton", Main)
+    RespawnBtn.Size = UDim2.new(0,160,0,40)
+    RespawnBtn.Position = UDim2.new(0,30,0,75)
+    RespawnBtn.BackgroundColor3 = C.WHITE
+    RespawnBtn.Font = Enum.Font.GothamBold
+    RespawnBtn.Text = "RESPAWN"
+    RespawnBtn.TextColor3 = C.BLACK
+    RespawnBtn.TextSize = 15
+    Instance.new("UICorner",RespawnBtn).CornerRadius = UDim.new(0.12,0)
+
+    local function DoRespawn()
+        if not RespawnGui then return end
+        PlaySound(SOUND_BTN)
+        RespawnGui:Destroy()
+        RespawnGui = nil
+        LocalPlayer:LoadCharacter()
+    end
+
+    RespawnBtn.MouseButton1Click:Connect(DoRespawn)
+    UserInputService.InputBegan:Connect(function(Input, GameProcessed)
+        if GameProcessed or not RespawnGui then return end
+        if Input.UserInputType == Enum.UserInputType.Keyboard and Input.KeyCode == Enum.KeyCode.Space then
+            DoRespawn()
+        end
+    end)
+end
+
+local function SetupDeathCheck()
+    LocalPlayer.CharacterAdded:Connect(function(c)
+        local hum = c:WaitForChild("Humanoid")
+        hum.Died:Connect(function()
+            if _G.Settings.AutoRespawn then
+                task.wait(0.1)
+                LocalPlayer:LoadCharacter()
+            else
+                CreateRespawnGui()
+            end
+        end)
+    end)
+end
+SetupDeathCheck()
+
+local function MakeRotatingIndicator()
+    local Indicator = {Lines = {}}
+    for i=1,4 do
+        local Line = Drawing.new("Line")
+        Line.Color = C.WHITE; Line.Thickness = 2; Line.Transparency = 1; Line.Visible = false
+        table.insert(Indicator.Lines, Line)
+    end
+    Indicator.Update = function(self, targetPos)
+        if not _G.Settings.TargetIndicator or not targetPos then
+            for _,l in ipairs(self.Lines) do l.Visible=false end
+            return
+        end
+        local camPos = Camera.CFrame.Position
+        local dir = (targetPos - camPos).Unit
+        local up = Vector3.new(0,1,0)
+        local right = dir:Cross(up).Unit
+        local size = 2.5
+        local rot = os.clock() * 2
+        local pts = {
+            targetPos + (right*math.cos(rot) + up*math.sin(rot))*size,
+            targetPos + (right*math.cos(rot+1.57) + up*math.sin(rot+1.57))*size,
+            targetPos + (right*math.cos(rot+3.14) + up*math.sin(rot+3.14))*size,
+            targetPos + (right*math.cos(rot+4.71) + up*math.sin(rot+4.71))*size
+        }
+        for i=1,4 do
+            local p1, v1 = Camera:WorldToViewportPoint(pts[i])
+            local p2, v2 = Camera:WorldToViewportPoint(pts[i%4+1])
+            local line = self.Lines[i]
+            line.Visible = v1 and v2
+            if line.Visible then line.From=Vector2.new(p1.X,p1.Y); line.To=Vector2.new(p2.X,p2.Y) end
+        end
+    end
+    Indicator.Destroy = function(self) for _,l in ipairs(self.Lines) do l:Remove() end end
+    return Indicator
+end
+RotateIndicator = MakeRotatingIndicator()
+
 local BgSound = Instance.new("Sound", SoundService)
 BgSound.SoundId = SOUND_LOOP; BgSound.Looped = true; BgSound.Volume = 0.5; BgSound:Play()
 
--- UI BASE
 local ScreenGui = Instance.new("ScreenGui", PlayerGui)
 ScreenGui.Name = "VareWareAimlock"
 ScreenGui.ResetOnSpawn = false; ScreenGui.IgnoreGuiInset = true
@@ -131,21 +248,6 @@ FullBlack.Size = UDim2.new(1,0,1,0)
 FullBlack.BackgroundTransparency = 1 - OPACITY_70
 FullBlack.BackgroundColor3 = C.BLACK; FullBlack.ZIndex = -1
 
--- FLOATING DUST EFFECT
-local DustContainer = Instance.new("Frame", ScreenGui)
-DustContainer.Size = UDim2.new(1,0,1,0); DustContainer.BackgroundTransparency = 1
-for i=1,25 do
-    local Dust = Instance.new("Frame", DustContainer)
-    Dust.Size = UDim2.new(0,math.random(2,6),0,math.random(2,6))
-    Dust.Position = UDim2.new(math.random(),0,math.random(),0)
-    Dust.BackgroundColor3 = C.WHITE
-    Dust.BackgroundTransparency = 0.7
-    Instance.new("UICorner",Dust).CornerRadius = UDim.new(1,0)
-    TweenService:Create(Dust, TweenInfo.new(math.random(4,8), Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {
-        Position = UDim2.new(math.random(),0,math.random(),0), BackgroundTransparency = 0.9
-    }):Play()
-end
-
 local MainBG = Instance.new("Frame", ScreenGui)
 MainBG.Size = UDim2.new(0,580,0,480)
 MainBG.Position = UDim2.new(0.5,-290,0.5,-240)
@@ -153,17 +255,15 @@ MainBG.BackgroundTransparency = 1 - OPACITY_70
 MainBG.BackgroundColor3 = C.BLACK
 Instance.new("UICorner",MainBG).CornerRadius = UDim.new(0.04,0)
 
--- ✅ UPDATED: DRAGGABLE MINIMIZE BUTTON
 local MinBox = Instance.new("TextButton", ScreenGui)
 MinBox.Size = UDim2.new(0,50,0,50); MinBox.Position = UDim2.new(0.5,-25,0.5,-25)
 MinBox.BackgroundTransparency = 1 - OPACITY_70; MinBox.BackgroundColor3 = C.BLACK
 MinBox.Text = "•"; MinBox.Font = Enum.Font.GothamBold; MinBox.TextColor3 = C.WHITE
 MinBox.TextSize = 24; MinBox.Visible = false; Instance.new("UICorner",MinBox).CornerRadius = UDim.new(1,0)
--- Drag Logic
 local dragging, dragStart, startPos
-MinBox.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then dragging=true; dragStart=i.Position; startPos=MinBox.Position end end)
-UserInputService.InputChanged:Connect(function(i) if dragging and i.UserInputType==Enum.UserInputType.MouseMovement then local d=i.Position-dragStart; MinBox.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y) end end)
-UserInputService.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end end)
+MinBox.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=true; dragStart=i.Position; startPos=MinBox.Position end end)
+UserInputService.InputChanged:Connect(function(i) if dragging and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType.Touch) then local d=i.Position-dragStart; MinBox.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y) end end)
+UserInputService.InputEnded:Connect(function(i) dragging=false end)
 
 local Sidebar = Instance.new("Frame", MainBG)
 Sidebar.Size = UDim2.new(0,65,1,0); Sidebar.BackgroundTransparency = 0.3; Sidebar.BackgroundColor3 = C.BLACK
@@ -185,31 +285,38 @@ Instance.new("UICorner",MinBtn).CornerRadius = UDim.new(0.5,0)
 local CloseBtn = Instance.new("TextButton", TopBar)
 CloseBtn.Size = UDim2.new(0,28,0,28); CloseBtn.Position = UDim2.new(1,-28,0.5,-14)
 CloseBtn.BackgroundTransparency = 0.3; CloseBtn.BackgroundColor3 = C.BLACK
-CloseBtn.Text = "X"; CloseBtn.Font = Enum.Font.GothamBold; CloseBtn.TextColor3 = C.WHITE
+CloseBtn.Text = "×"; CloseBtn.Font = Enum.Font.GothamBold; CloseBtn.TextColor3 = C.WHITE
 Instance.new("UICorner",CloseBtn).CornerRadius = UDim.new(0.5,0)
 
 local TabAim = Instance.new("Frame", Content); TabAim.Size=UDim2.new(1,0,1,0); TabAim.BackgroundTransparency=1; TabAim.Visible=true
+local TabIndicator = Instance.new("Frame", Content); TabIndicator.Size=UDim2.new(1,0,1,0); TabIndicator.BackgroundTransparency=1; TabIndicator.Visible=false
 local TabEnemy = Instance.new("Frame", Content); TabEnemy.Size=UDim2.new(1,0,1,0); TabEnemy.BackgroundTransparency=1; TabEnemy.Visible=false
+local TabPlayers = Instance.new("Frame", Content); TabPlayers.Size=UDim2.new(1,0,1,0); TabPlayers.BackgroundTransparency=1; TabPlayers.Visible=false
 
 local Indicator = Instance.new("Frame", Sidebar)
 Indicator.Size=UDim2.new(0,4,0,35); Indicator.Position=UDim2.new(0,4,0.12,0)
 Indicator.BackgroundColor3=C.WHITE; Instance.new("UICorner",Indicator).CornerRadius=UDim.new(1,0)
 
-local Tabs = {{Icon="🎯",Frame=TabAim},{Icon="👥",Frame=TabEnemy}}
+local Tabs = {
+    {Icon="⊕",Frame=TabAim},
+    {Icon="◎",Frame=TabIndicator},
+    {Icon="▣",Frame=TabEnemy},
+    {Icon="◉",Frame=TabPlayers}
+}
 for i,tab in ipairs(Tabs) do
     local btn = Instance.new("TextButton", Sidebar)
-    btn.Size=UDim2.new(1,-10,0,45); btn.Position=UDim2.new(0.05,0,0.12+(i-1)*0.25,0)
+    btn.Size=UDim2.new(1,-10,0,45); btn.Position=UDim2.new(0.05,0,0.12+(i-1)*0.22,0)
     btn.BackgroundTransparency=1; btn.Text=tab.Icon; btn.Font=Enum.Font.GothamBold; btn.TextColor3=C.WHITE; btn.TextSize=22
     btn.MouseButton1Click:Connect(function()
         PlaySound(SOUND_TAB)
         TweenService:Create(Indicator,TweenInfo.new(0.18),{Position=UDim2.new(0,4,btn.Position.Y.Scale+0.05,0)}):Play()
-        TabAim.Visible=false; TabEnemy.Visible=false; tab.Frame.Visible=true
+        TabAim.Visible=false; TabIndicator.Visible=false; TabEnemy.Visible=false; TabPlayers.Visible=false; tab.Frame.Visible=true
     end)
 end
 
--- UI BUILDERS
-local function AddToggle(yPos, name, setting)
-    local c = Instance.new("Frame", TabAim)
+local function AddToggle(yPos, name, setting, parent)
+    parent = parent or TabAim
+    local c = Instance.new("Frame", parent)
     c.Size = UDim2.new(1,0,0,50); c.Position = UDim2.new(0,0,yPos,0); c.BackgroundTransparency = 1
     local lbl = Instance.new("TextLabel", c)
     lbl.Size = UDim2.new(0.75,0,1,0); lbl.BackgroundTransparency = 1
@@ -225,7 +332,6 @@ local function AddToggle(yPos, name, setting)
         _G.Settings[setting] = not _G.Settings[setting]
         tb.Text = _G.Settings[setting] and "✓" or ""
         tb.BackgroundColor3 = _G.Settings[setting] and C.WHITE or C.GREY
-        tb.TextColor3 = _G.Settings[setting] and C.BLACK or C.WHITE
     end)
 end
 
@@ -241,15 +347,31 @@ local function AddSlider(name,posY,setting,default)
 end
 
 AddToggle(0.03, "Aimlock", "AimlockEnabled")
-AddToggle(0.13, "Auto Air Trigger", "AutoAirTrigger")
+AddToggle(0.13, "Auto Air Shoot", "AutoAirTrigger")
 AddToggle(0.23, "Auto Zoom", "AutoZoomEnabled")
 AddSlider("Aim Speed",0.35,"AimSpeed",50)
 AddSlider("Offset",0.50,"Offset",15)
 AddSlider("Prediction",0.65,"Prediction",8)
 
--- BODY PART SELECTOR
+AddToggle(0.05, "Target Indicator", "TargetIndicator", TabIndicator)
+AddToggle(0.15, "Auto Respawn", "AutoRespawn", TabIndicator)
+
+local ManualRespawnBtn = Instance.new("TextButton", TabIndicator)
+ManualRespawnBtn.Size = UDim2.new(1,0,0,45)
+ManualRespawnBtn.Position = UDim2.new(0,0,0.30,0)
+ManualRespawnBtn.BackgroundColor3 = C.GREY
+ManualRespawnBtn.Font = Enum.Font.GothamBold
+ManualRespawnBtn.Text = "MANUAL RESPAWN"
+ManualRespawnBtn.TextColor3 = C.WHITE
+ManualRespawnBtn.TextSize = 15
+Instance.new("UICorner",ManualRespawnBtn).CornerRadius = UDim.new(0.12,0)
+ManualRespawnBtn.MouseButton1Click:Connect(function()
+    PlaySound(SOUND_BTN)
+    LocalPlayer:LoadCharacter()
+end)
+
 local PartContainer = Instance.new("Frame", TabAim)
-PartContainer.Size = UDim2.new(1,0,0,50); PartContainer.Position = UDim2.new(0,0,0.80,0); PartContainer.BackgroundTransparency = 1
+PartContainer.Size = UDim2.new(1,0,0,50); PartContainer.Position = UDim2.new(0,0,0.85,0); PartContainer.BackgroundTransparency = 1
 local PartLabel = Instance.new("TextLabel", PartContainer)
 PartLabel.Size = UDim2.new(0.3,0,1,0); PartLabel.BackgroundTransparency = 1
 PartLabel.Font = Enum.Font.GothamSemibold; PartLabel.Text = "Aim Part:"; PartLabel.TextColor3 = C.WHITE; PartLabel.TextSize = 15; PartLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -268,33 +390,33 @@ for i,part in ipairs(Parts) do
     btn.MouseButton1Click:Connect(function()
         PlaySound(SOUND_BTN)
         _G.Settings.AimPart = part
+        CurrentTarget = nil
         for _,b in pairs(PartButtons) do b.BackgroundColor3 = C.GREY; b.TextColor3 = C.WHITE end
         btn.BackgroundColor3 = C.WHITE; btn.TextColor3 = C.BLACK
     end)
-    table.insert(PartButtons, btn)
+    PartButtons[i] = btn
 end
--- ENEMY TAB
 local Search = Instance.new("TextBox", TabEnemy)
-Search.Size=UDim2.new(1,0,0,45); Search.Position=UDim2.new(0,0,0.05,0)
+Search.Size=UDim2.new(1,0,0,45); Search.Position=UDim2.new(0,0,0.03,0)
 Search.BackgroundTransparency=0.3; Search.BackgroundColor3=C.BLACK; Search.PlaceholderText="Add enemy by name..."; Search.Font=Enum.Font.Gotham; Search.TextColor3=C.WHITE; Search.TextSize=14
 Instance.new("UICorner",Search).CornerRadius=UDim.new(0.1,0)
 
 local ToggleName = Instance.new("TextButton", TabEnemy)
-ToggleName.Size=UDim2.new(0.48,0,0,40); ToggleName.Position=UDim2.new(0,0,0.18,0)
+ToggleName.Size=UDim2.new(0.48,0,0,40); ToggleName.Position=UDim2.new(0,0,0.15,0)
 ToggleName.BackgroundColor3 = _G.Settings.ShowNameDist and C.WHITE or C.GREY
 ToggleName.Font=Enum.Font.GothamBold; ToggleName.TextColor3 = _G.Settings.ShowNameDist and C.BLACK or C.WHITE
-ToggleName.Text = "Name/Dist: ON"
+ToggleName.Text = "Name/Dist: "..(_G.Settings.ShowNameDist and "ON" or "OFF")
 Instance.new("UICorner",ToggleName).CornerRadius=UDim.new(0.08,0)
 
 local ToggleSkel = Instance.new("TextButton", TabEnemy)
-ToggleSkel.Size=UDim2.new(0.48,0,0,40); ToggleSkel.Position=UDim2.new(0.52,0,0.18,0)
+ToggleSkel.Size=UDim2.new(0.48,0,0,40); ToggleSkel.Position=UDim2.new(0.52,0,0.15,0)
 ToggleSkel.BackgroundColor3 = _G.Settings.ShowSkeleton and C.WHITE or C.GREY
 ToggleSkel.Font=Enum.Font.GothamBold; ToggleSkel.TextColor3 = _G.Settings.ShowSkeleton and C.BLACK or C.WHITE
-ToggleSkel.Text = "Skeleton: ON"
+ToggleSkel.Text = "Skeleton: "..(_G.Settings.ShowSkeleton and "ON" or "OFF")
 Instance.new("UICorner",ToggleSkel).CornerRadius=UDim.new(0.08,0)
 
 local EnemyList = Instance.new("ScrollingFrame", TabEnemy)
-EnemyList.Size=UDim2.new(1,0,0.55,0); EnemyList.Position=UDim2.new(0,0,0.32,0)
+EnemyList.Size=UDim2.new(1,0,0.70,0); EnemyList.Position=UDim2.new(0,0,0.28,0)
 EnemyList.BackgroundTransparency=0.3; EnemyList.BackgroundColor3=C.BLACK; EnemyList.ScrollBarThickness=6; EnemyList.ScrollBarImageColor3=C.WHITE; EnemyList.CanvasSize=UDim2.new(0,0,0,0)
 Instance.new("UICorner",EnemyList).CornerRadius=UDim.new(0.08,0)
 local Layout = Instance.new("UIListLayout", EnemyList); Layout.SortOrder=Enum.SortOrder.LayoutOrder; Layout.Padding=UDim.new(0,10)
@@ -317,6 +439,7 @@ local function RemoveEnemy(uid)
     if d.Skeleton then for _,v in pairs(d.Skeleton) do v.Line:Remove() end end
     if d.Row then d.Row:Destroy() end
     _G.Enemies[uid] = nil
+    LastKnownHealth[uid] = nil
     EnemyList.CanvasSize = UDim2.new(0,0,0,Layout.AbsoluteContentSize.Y)
     if CurrentTarget and d.Player and CurrentTarget.Parent == d.Player.Character then CurrentTarget = nil end
 end
@@ -331,7 +454,7 @@ local function AddEnemy(plr)
     nameLbl.Size=UDim2.new(0.75,0,1,0); nameLbl.Position=UDim2.new(0.05,0,0,0)
     nameLbl.BackgroundTransparency=1; nameLbl.Font=Enum.Font.GothamSemibold; nameLbl.TextColor3=C.WHITE; nameLbl.Text=plr.DisplayName.." (@"..plr.Name..")"; nameLbl.TextXAlignment=Enum.TextXAlignment.Left
     local rmBtn=Instance.new("TextButton",row)
-    rmBtn.Size=UDim2.new(0,32,0,32); rmBtn.Position=UDim2.new(0.92,0,0.2,0); rmBtn.BackgroundColor3=C.GREY; rmBtn.Text="X"; rmBtn.Font=Enum.Font.GothamBold; rmBtn.TextColor3=C.WHITE
+    rmBtn.Size=UDim2.new(0,32,0,32); rmBtn.Position=UDim2.new(0.92,0,0.2,0); rmBtn.BackgroundColor3=C.GREY; rmBtn.Text="×"; rmBtn.Font=Enum.Font.GothamBold; rmBtn.TextColor3=C.WHITE
     Instance.new("UICorner",rmBtn).CornerRadius=UDim.new(0.5,0)
 
     local glow = Instance.new("Highlight", CoreGui)
@@ -341,10 +464,14 @@ local function AddEnemy(plr)
     local tName = Instance.new("TextLabel",tag); tName.Size=UDim2.new(1,0,0.5,0); tName.BackgroundTransparency=1; tName.Font=Enum.Font.GothamBold; tName.TextColor3=C.WHITE; tName.TextSize=12
     local tDist = Instance.new("TextLabel",tag); tDist.Size=UDim2.new(1,0,0.5,0); tDist.Position=UDim2.new(0,0,0.5,0); tDist.BackgroundTransparency=1; tDist.Font=Enum.Font.Gotham; tDist.TextColor3=C.WHITE; tDist.TextSize=11
     local skel = plr.Character and MakeSkeleton(plr.Character) or {}
+    if plr.Character and plr.Character:FindFirstChild("Humanoid") then
+        LastKnownHealth[uid] = plr.Character.Humanoid.Health
+    end
 
     _G.Enemies[uid] = {Player=plr,Row=row,Glow=glow,Tag=tag,TName=tName,TDist=tDist,Skeleton=skel}
     rmBtn.MouseButton1Click:Connect(function() PlaySound(SOUND_BTN); RemoveEnemy(uid) end)
     plr.Removing:Connect(function() RemoveEnemy(uid) end)
+    plr.CharacterAdded:Connect(function(c) task.wait(0.1); if c:FindFirstChild("Humanoid") then LastKnownHealth[uid] = c.Humanoid.Health end end)
     EnemyList.CanvasSize = UDim2.new(0,0,0,Layout.AbsoluteContentSize.Y)
 end
 
@@ -372,69 +499,140 @@ ToggleSkel.MouseButton1Click:Connect(function()
     ToggleSkel.TextColor3 = _G.Settings.ShowSkeleton and C.BLACK or C.WHITE
 end)
 
--- ✅ UPDATED: STRICT TARGET LOGIC — DROPS IF BLOCKED
+local PlayerScroll = Instance.new("ScrollingFrame", TabPlayers)
+PlayerScroll.Size = UDim2.new(1,0,1,0); PlayerScroll.BackgroundTransparency = 0.3
+PlayerScroll.BackgroundColor3 = C.BLACK; PlayerScroll.ScrollBarThickness = 6
+PlayerScroll.CanvasSize = UDim2.new(0,0,0,0)
+Instance.new("UICorner",PlayerScroll).CornerRadius = UDim.new(0.08,0)
+local PlayerLayout = Instance.new("UIListLayout", PlayerScroll)
+PlayerLayout.SortOrder = Enum.SortOrder.Name; PlayerLayout.Padding = UDim.new(0,8)
+
+local function ResetCamera()
+    if OriginalCam then Camera.CameraType = OriginalCam; OriginalCam = nil end
+    ViewTarget = nil
+end
+
+local function UpdatePlayerList()
+    PlayerScroll:ClearAllChildren()
+    Instance.new("UIListLayout", PlayerScroll).SortOrder = Enum.SortOrder.Name
+    for _,plr in pairs(Players:GetPlayers()) do
+        local Row = Instance.new("Frame", PlayerScroll)
+        Row.Size = UDim2.new(1,0,0,60); Row.BackgroundTransparency = 0.3
+        Row.BackgroundColor3 = C.BLACK; Instance.new("UICorner",Row).CornerRadius = UDim.new(0.08,0)
+
+        local Avatar = Instance.new("ImageLabel", Row)
+        Avatar.Size = UDim2.new(0,50,0,50); Avatar.Position = UDim2.new(0.02,0,0.5,-25)
+        Avatar.BackgroundTransparency = 1
+        pcall(function() Avatar.Image = "rbxthumb://type=AvatarHeadShot&id="..plr.UserId.."&w=150&h=150" end)
+
+        local NameLbl = Instance.new("TextLabel", Row)
+        NameLbl.Size = UDim2.new(0.55,0,1,0); NameLbl.Position = UDim2.new(0.15,0,0,0)
+        NameLbl.BackgroundTransparency = 1; NameLbl.Font = Enum.Font.GothamSemibold
+        NameLbl.TextColor3 = C.WHITE; NameLbl.TextSize = 14
+        NameLbl.Text = plr.DisplayName.."\n@"..plr.Name; NameLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+        local ViewBtn = Instance.new("TextButton", Row)
+        ViewBtn.Size = UDim2.new(0,80,0,35); ViewBtn.Position = UDim2.new(0.82,0,0.5,-17.5)
+        ViewBtn.BackgroundColor3 = C.GREY; ViewBtn.Font = Enum.Font.GothamBold
+        ViewBtn.TextColor3 = C.WHITE; ViewBtn.TextSize = 12; ViewBtn.Text = "VIEW"
+        Instance.new("UICorner",ViewBtn).CornerRadius = UDim.new(0.15,0)
+
+        ViewBtn.MouseButton1Click:Connect(function()
+            PlaySound(SOUND_BTN)
+            if ViewTarget == plr then
+                ResetCamera()
+                ViewBtn.BackgroundColor3 = C.GREY
+                ViewBtn.TextColor3 = C.WHITE
+            else
+                OriginalCam = Camera.CameraType
+                Camera.CameraType = Enum.CameraType.Scriptable
+                ViewTarget = plr
+                ViewBtn.BackgroundColor3 = C.WHITE
+                ViewBtn.TextColor3 = C.BLACK
+            end
+        end)
+    end
+    PlayerScroll.CanvasSize = UDim2.new(0,0,0,PlayerLayout.AbsoluteContentSize.Y)
+end
+
+Players.PlayerAdded:Connect(UpdatePlayerList)
+Players.PlayerRemoving:Connect(UpdatePlayerList)
+UpdatePlayerList()
+
 local function GetBestTarget()
-    if IsRagdolled(Humanoid) or not _G.Settings.AimlockEnabled or not Humanoid or Humanoid.Health <= 0 then
+    -- ✅ NO AIMING IF YOU ARE NOT HEALTHY ENOUGH
+    if not CanAim() or not _G.Settings.AimlockEnabled then
         CurrentTarget = nil; return nil
     end
     if CurrentTarget then
         local targetChar = CurrentTarget.Parent
-        local targetHum = targetChar and targetChar:FindFirstChild("Humanoid")
-        if targetHum and targetHum.Health > 0 and not IsRagdolled(targetHum) then
-            -- RE‑CHECK EVERY FRAME
-            if not HasLineOfSight(HumanoidRootPart.Position, CurrentTarget) or not IsOnScreen(CurrentTarget.Position) then
-                CurrentTarget = nil
-            else return CurrentTarget end
-        else CurrentTarget = nil end
-    end
-    local best,bestD=nil,math.huge
-    for _,d in pairs(_G.Enemies) do
-        local p=d.Player; if not p then continue end
-        local c=p.Character; local hum=c and c:FindFirstChild("Humanoid")
-        local aimPart = c and c:FindFirstChild(_G.Settings.AimPart)
-        local hrp=c and c:FindFirstChild("HumanoidRootPart")
-        if IsValidHuman(hum) and aimPart and hrp and HasLineOfSight(HumanoidRootPart.Position, aimPart) then
-            local dist=(Camera.CFrame.Position-aimPart.Position).Magnitude
-            if dist<bestD then bestD=dist; best=aimPart end
+        if not IsValidTarget(targetChar) then CurrentTarget = nil
+        else
+            local requiredPart = targetChar:FindFirstChild(_G.Settings.AimPart)
+            if requiredPart and CurrentTarget == requiredPart and HasLineOfSight(HumanoidRootPart.Position, CurrentTarget) then
+                return CurrentTarget
+            end
+            CurrentTarget = nil
         end
     end
-    CurrentTarget=best; return best
+    local best, bestDist = nil, math.huge
+    for _, data in pairs(_G.Enemies) do
+        local plr = data.Player; if not plr then continue end
+        local char = plr.Character
+        local aimPart = char and char:FindFirstChild(_G.Settings.AimPart)
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if IsValidTarget(char) and aimPart and hrp and HasLineOfSight(HumanoidRootPart.Position, aimPart) then
+            local dist = (Camera.CFrame.Position - aimPart.Position).Magnitude
+            if dist < bestDist then bestDist = dist; best = aimPart end
+        end
+    end
+    CurrentTarget = best; return best
 end
 
--- ✅ UPDATED: PROPER FULL LEFT‑CLICK TRIGGER
-local LastShot = 0
 local function AutoAirCheck(target)
     if not _G.Settings.AutoAirTrigger or not target then return end
-    local char = target.Parent
-    local hum = char:FindFirstChild("Humanoid")
-    if hum and hum.FloorMaterial == Enum.Material.Air and os.clock() - LastShot > 0.25 then
-        task.spawn(function()
-            UserInputService:SendKeyEvent(true, Enum.KeyCode.MouseLeftButton, false, game)
-            task.wait(0.04)
-            UserInputService:SendKeyEvent(false, Enum.KeyCode.MouseLeftButton, false, game)
-            LastShot = os.clock()
-        end)
-    end
+    if not CanAim() then return end
+    if os.clock() - LastShot < AUTO_SHOOT_DELAY then return end
+    local LocalTool = Character:FindFirstChildOfClass("Tool")
+    if not LocalTool then return end
+    local TargetChar = target.Parent
+    local TargetHum = TargetChar:FindFirstChild("Humanoid")
+    if not TargetHum or not IsValidTarget(TargetChar) then return end
+    local IsInAir = TargetHum.FloorMaterial == Enum.Material.Air
+        or TargetHum:GetState() == Enum.HumanoidStateType.Jumping
+        or TargetHum:GetState() == Enum.HumanoidStateType.Freefall
+    if not IsInAir then return end
+    task.spawn(function()
+        UserInputService:InputBegan({UserInputType = Enum.UserInputType.MouseButton1, GameProcessedEvent = false}, game)
+        task.wait(0.03)
+        UserInputService:InputEnded({UserInputType = Enum.UserInputType.MouseButton1, GameProcessedEvent = false}, game)
+        LastShot = os.clock()
+    end)
 end
 
--- MAIN LOOP
 RunService.RenderStepped:Connect(function()
+    if RotateIndicator then RotateIndicator:Update(CurrentTarget and CurrentTarget.Position or nil) end
+
+    if ViewTarget and ViewTarget.Character and ViewTarget.Character:FindFirstChild("HumanoidRootPart") then
+        local Pos = ViewTarget.Character.HumanoidRootPart.Position
+        Camera.CFrame = CFrame.new(Pos + Vector3.new(8,4,0), Pos)
+    end
     if not Character or not HumanoidRootPart then CurrentTarget=nil return end
     local target = GetBestTarget()
     if _G.Settings.AutoZoomEnabled then Camera.FieldOfView = target and _G.Settings.ZoomFOV or _G.Settings.NormalFOV end
     if target then
         AutoAirCheck(target)
-        local hrp=target.Parent:FindFirstChild("HumanoidRootPart")
-        local aim=target.Position
-        if hrp then aim += hrp.Velocity*(_G.Settings.Prediction/100) end
-        aim += Vector3.new(0,_G.Settings.Offset/10,0)
-        Camera.CFrame=Camera.CFrame:Lerp(CFrame.lookAt(Camera.CFrame.Position,aim), _G.Settings.AimSpeed/100)
+        local targetHRP = target.Parent:FindFirstChild("HumanoidRootPart")
+        local aimPos = target.Position
+        if targetHRP then aimPos += targetHRP.Velocity * (_G.Settings.Prediction / 100) end
+        aimPos += Vector3.new(0, _G.Settings.Offset / 10, 0)
+        Camera.CFrame = Camera.CFrame:Lerp(CFrame.lookAt(Camera.CFrame.Position, aimPos), _G.Settings.AimSpeed / 100)
     end
     for uid,d in pairs(_G.Enemies) do
         local p=d.Player; if not p then RemoveEnemy(uid) continue end
         local c=p.Character; local hum=c and c:FindFirstChild("Humanoid")
         local hrp=c and c:FindFirstChild("HumanoidRootPart")
-        if c and IsValidHuman(hum) and hrp then
+        if c and IsValidTarget(c) and hrp then
             d.Glow.Enabled = _G.Settings.ShowNameDist
             d.Tag.Enabled = _G.Settings.ShowNameDist
             if _G.Settings.ShowNameDist then
@@ -461,7 +659,11 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- MINIMIZE / CLOSE
-MinBtn.MouseButton1Click:Connect(function() PlaySound(SOUND_MIN); MainBG.Visible=false; MinBox.Visible=true; FullBlack.Visible=false; DustContainer.Visible=false; BgSound:Pause() end)
-MinBox.MouseButton1Click:Connect(function() PlaySound(SOUND_BTN); MinBox.Visible=false; MainBG.Visible=true; FullBlack.Visible=true; DustContainer.Visible=true; BgSound:Resume() end)
-CloseBtn.MouseButton1Click:Connect(function() PlaySound(SOUND_CLOSE); BgSound:Stop(); task.delay(0.3,function() ScreenGui:Destroy() end) end)
+MinBtn.MouseButton1Click:Connect(function() PlaySound(SOUND_MIN); MainBG.Visible=false; MinBox.Visible=true; FullBlack.Visible=false; BgSound:Pause() end)
+MinBox.MouseButton1Click:Connect(function() PlaySound(SOUND_BTN); MinBox.Visible=false; MainBG.Visible=true; FullBlack.Visible=true; BgSound:Resume() end)
+CloseBtn.MouseButton1Click:Connect(function() PlaySound(SOUND_CLOSE); ResetCamera(); if RotateIndicator then RotateIndicator:Destroy() end; BgSound:Stop(); task.delay(0.3,function() ScreenGui:Destroy() end) end)
+
+print("✅ Done! Both rules active:")
+print("• Skip enemies with health ≤13, only target when >13")
+print("• Stop aiming when YOUR health ≤13, only resume when >13")
+end
